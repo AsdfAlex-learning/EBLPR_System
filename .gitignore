@@ -1,0 +1,18 @@
+# Virtual Environment
+venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+data/output_results/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temp files
+*.tmp

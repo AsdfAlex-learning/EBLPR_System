@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+# matlabengine == 9.17
+pytesseract
+opencv-python
+numpy
+pillow
+python-multipart
+aiofiles
