@@ -1,11 +1,97 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>电动自行车车牌识别系统</title>
+    <link rel="stylesheet" href="css/style.css">
 </head>
+
 <body>
-    
+    <div class="main-content">
+        <div class="intro-container">
+            <div class="intro-card animate-slide">
+                <!-- 上传区域 -->
+                <div class="upload-area">
+                    <h2>电动自行车车牌识别</h2>
+                    <input type="file" id="imageInput" class="input-file" accept="image/*">
+                    <label for="imageInput" class="upload-btn">选择图片</label>
+                </div>
+
+                <!-- 预览区域 -->
+                <div class="preview-section">
+                    <!-- 原始图片预览 -->
+                    <div class="preview-container">
+                        <h3 class="preview-title">原始图片</h3>
+                        <div class="preview-box">
+                            <img id="originalPreview" class="preview-image" src="#" alt="等待上传...">
+                        </div>
+                    </div>
+
+                    <!-- 处理结果预览 -->
+                    <div class="preview-container">
+                        <h3 class="preview-title">处理结果</h3>
+                        <div class="preview-box">
+                            <img id="processedPreview" class="preview-image" src="#" alt="等待处理...">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 识别结果显示区域 -->
+                <div class="result-section">
+                    <h3 class="result-title">识别结果</h3>
+                    <div id="resultText" class="result-content">等待识别...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 图片上传预览
+        document.getElementById('imageInput').addEventListener('change', function (e) {
+            if (e.target.files && e.target.files[0]) {
+                const reader = new FileReader();
+                const originalPreview = document.getElementById('originalPreview');
+
+                reader.onload = function (e) {
+                    originalPreview.src = e.target.result;
+                    originalPreview.style.display = 'block';
+                };
+
+                reader.readAsDataURL(e.target.files[0]);
+
+                // TODO: 调用后端API处理图片
+                uploadAndProcess(e.target.files[0]);
+            }
+        });
+
+        // TODO: 添加与后端的交互逻辑
+        async function uploadAndProcess(file) {
+            const formData = new FormData();
+            formData.append('image', file);
+
+            try {
+                const response = await fetch('/api/process-image', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    // 更新处理后的图片和识别结果
+                    document.getElementById('processedPreview').src = data.processedImage;
+                    document.getElementById('processedPreview').style.display = 'block';
+                    document.getElementById('resultText').textContent = data.result;
+                } else {
+                    throw new Error('图片处理失败');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('resultText').textContent = '处理出错: ' + error.message;
+            }
+        }
+    </script>
 </body>
+
 </html>
