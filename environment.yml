@@ -6,11 +6,23 @@ dependencies:
   - python=3.8
   - pip
   - pip:
-    - fastapi
-    - uvicorn
-    - python-multipart
-    - pytesseract
-    - opencv-python
-    - numpy
-    - pillow
-    - aiofiles
+    # Web框架
+    - fastapi>=0.104.0
+    - uvicorn[standard]>=0.24.0
+    - python-multipart>=0.0.6
+    # 图像处理
+    - opencv-python>=4.8.0
+    - numpy>=1.24.0
+    - pillow>=10.0.0
+    # OCR
+    - pytesseract>=0.3.10
+    # 文件处理
+    - aiofiles>=23.2.0
+    # 测试工具（用于环境测试脚本的彩色输出）
+    - colorama>=0.4.6
+    # 可选：MATLAB Engine（需要从MATLAB安装目录手动安装，不能通过pip直接安装）
+    # 安装方法：
+    #   Windows: cd "C:\Program Files\MATLAB\R2023a\extern\engines\python" && python setup.py install
+    #   Linux: cd "/usr/local/MATLAB/R2023a/extern/engines/python" && python setup.py install
+    #   Mac: cd "/Applications/MATLAB_R2023a.app/extern/engines/python" && python setup.py install
+    # - matlabengine==9.17
