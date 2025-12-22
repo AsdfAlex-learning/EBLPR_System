@@ -16,8 +16,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from .config import (
     INPUT_IMAGES_DIR,
@@ -33,6 +34,13 @@ app = FastAPI(title='LPR Backend with MATLAB bridge')
 Path(INPUT_IMAGES_DIR).mkdir(parents=True, exist_ok=True)
 Path(PROCESSED_IMAGES_DIR).mkdir(parents=True, exist_ok=True)
 
+# 挂载前端静态目录
+app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
+
+# 配置根路径返回首页（HTML）
+@app.get("/")
+async def read_index():
+    return FileResponse("frontend/index.html")
 
 @app.get('/api/matlab/status')
 async def matlab_status():
