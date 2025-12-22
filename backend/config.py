@@ -1,55 +1,40 @@
+"""
+配置文件：定义车牌识别后端的核心路径配置
+- INPUT_IMAGES_DIR: 上传的原始图像存储目录
+- PROCESSED_IMAGES_DIR: MATLAB处理后的车牌图像存储目录
+- 补充通用配置（如日志级别），方便后续扩展
+"""
 import os
-import platform
-import shutil
+from pathlib import Path
 
-def find_tesseract_executable():
-    """自动检测Tesseract-OCR可执行文件路径（跨平台）"""
-    system = platform.system()
-    
-    # 首先尝试从环境变量或PATH中查找
-    tesseract_cmd = shutil.which('tesseract')
-    if tesseract_cmd:
-        return tesseract_cmd
-    
-    # 如果PATH中找不到，尝试常见安装路径
-    if system == 'Windows':
-        common_paths = [
-            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-            os.path.expanduser(r'~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'),
-        ]
-    elif system == 'Darwin':  # macOS
-        common_paths = [
-            '/usr/local/bin/tesseract',
-            '/opt/homebrew/bin/tesseract',
-            '/usr/bin/tesseract',
-        ]
-    else:  # Linux
-        common_paths = [
-            '/usr/bin/tesseract',
-            '/usr/local/bin/tesseract',
-        ]
-    
-    for path in common_paths:
-        if os.path.exists(path):
-            return path
-    
-    # 如果都找不到，返回默认Windows路径（向后兼容）
-    if system == 'Windows':
-        return r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    else:
-        return 'tesseract'  # 假设在PATH中
+# ==================== 基础路径配置 ====================
+# 获取当前config.py文件所在的目录（适配不同运行环境）
+BASE_DIR = Path(__file__).resolve().parent
 
-# Tesseract-OCR配置（自动检测）
-TESSERACT_CMD = find_tesseract_executable()
+# 原始上传图像存储目录（默认：backend/input_images）
+INPUT_IMAGES_DIR = os.path.join(BASE_DIR, "input_images")
 
-# 输入输出路径配置
-INPUT_IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'input_images')
-OUTPUT_RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'output_results')
-PROCESSED_IMAGES_DIR = os.path.join(OUTPUT_RESULTS_DIR, 'processed_images')
+# MATLAB处理后的车牌图像存储目录（默认：backend/processed_images）
+PROCESSED_IMAGES_DIR = os.path.join(BASE_DIR, "processed_images")
 
-# 确保输出目录存在
-os.makedirs(PROCESSED_IMAGES_DIR, exist_ok=True)
+# ==================== 可选扩展配置（保留兼容性） ====================
+# 如果你后续需要恢复OCR功能，可保留以下配置（当前main.py已移除，仅作备份）
+TESSERACT_CMD = "tesseract"  # Tesseract OCR可执行文件路径（Windows需指定完整路径，如"C:/Program Files/Tesseract-OCR/tesseract.exe"）
+OCR_CONFIG = "--psm 8 -l chi_sim+eng"  # OCR配置：psm8表示单字符识别，语言包包含中文+英文
 
-# OCR配置
-OCR_CONFIG = r'--psm 7 --oem 3'  # PSM 7适用于单行文本
+# ==================== 日志配置（可选） ====================
+LOG_LEVEL = "INFO"  # 日志级别：DEBUG/INFO/WARNING/ERROR
+LOG_FILE = os.path.join(BASE_DIR, "logs", "lpr_backend.log")  # 日志文件存储路径
+
+# ==================== 路径初始化（可选，可移到main.py） ====================
+def init_directories():
+    """初始化所需的目录（如果不存在则创建）"""
+    # 创建输入/输出图像目录
+    Path(INPUT_IMAGES_DIR).mkdir(parents=True, exist_ok=True)
+    Path(PROCESSED_IMAGES_DIR).mkdir(parents=True, exist_ok=True)
+    # 创建日志目录（如果启用日志文件）
+    Path(os.path.dirname(LOG_FILE)).mkdir(parents=True, exist_ok=True)
+
+# 可选：导入时自动初始化目录（也可在main.py中调用init_directories()）
+# if __name__ != "__main__":
+#     init_directories()

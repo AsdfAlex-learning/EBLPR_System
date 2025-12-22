@@ -19,7 +19,10 @@ from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from .config import INPUT_IMAGES_DIR, PROCESSED_IMAGES_DIR
+from .config import (
+    INPUT_IMAGES_DIR,
+    PROCESSED_IMAGES_DIR,
+)
 from . import matlab_client
 
 logger = logging.getLogger(__name__)
@@ -104,13 +107,33 @@ async def process_image(file: UploadFile = File(...)):
     if not getattr(matlab_client, '_HAS_MATLAB', False):
         return JSONResponse(status_code=503, content={'error': 'matlab.engine not installed', 'uploaded': dest_path})
 
-    # Call the user-provided matlab_core/process_image(imagePath)
+    # ========== 核心修改：调用MATLAB的process_image，获取两个返回值（车牌路径+识别号码） ==========
     try:
-        result = matlab_client.client.call_function('process_image', dest_path, nargout=1)
-        return {'result': str(result), 'uploaded': dest_path}
+        # MATLAB的process_image返回两个输出参数：plate_path 和 plate_number
+        # nargout=2 表示获取2个输出参数
+        matlab_result = matlab_client.client.call_function(
+            'process_image', dest_path, nargout=2
+        )
+        
+        # 解析MATLAB返回的结果（matlab.engine返回的是元组，顺序对应MATLAB函数的输出）
+        plate_path_matlab = str(matlab_result[0])  # 裁剪后的车牌图像路径
+        plate_number = str(matlab_result[1])       # MATLAB识别出的车牌号码
+
+        # 校验结果有效性
+        if not plate_path_matlab or plate_path_matlab == '':
+            plate_path_matlab = '未生成车牌裁剪图'
+        if not plate_number or plate_number == '':
+            plate_number = 'MATLAB识别失败'
+
+        return {
+            'plate_number': plate_number,          # 新增：MATLAB识别的车牌号码
+            'uploaded_image': dest_path,           # 上传的原始图像路径
+            'plate_image_path': plate_path_matlab, # MATLAB裁剪后的车牌图像路径
+            'status': 'success'
+        }
     except Exception as e:
         logger.exception('MATLAB processing failed')
-        raise HTTPException(status_code=500, detail=f'MATLAB error: {e}')
+        raise HTTPException(status_code=500, detail=f'MATLAB error: {str(e)}')
 
 
 if __name__ == '__main__':

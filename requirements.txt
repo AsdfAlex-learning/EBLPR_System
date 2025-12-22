@@ -8,9 +8,6 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 pillow>=10.0.0
 
-# OCR
-pytesseract>=0.3.10
-
 # 文件处理
 aiofiles>=23.2.0
 
