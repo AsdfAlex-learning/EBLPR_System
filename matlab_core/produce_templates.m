@@ -1,13 +1,18 @@
 function produce_templates()
-    % 创建模板文件夹
-    template_dir = fullfile(pwd, 'char_templates');
+    % 创建模板文件夹（使用脚本所在目录的相对路径 char_templates/）
+    [script_path, ~, ~] = fileparts(mfilename('fullpath'));
+    % 拼接相对路径：脚本目录/char_templates
+    template_dir = fullfile(script_path, 'char_templates');
+    
+    % 检查并创建文件夹
     if ~exist(template_dir, 'dir')
         mkdir(template_dir);
     end
     
     % 字符列表
     chars = {'0','1','2','3','4','5','6','7','8','9',...
-             'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','粤'};
+             'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z',...
+             '粤','广','州','佛','山'};
     
     % 模板尺寸（高40，宽20）
     h = 40; w = 20;
@@ -35,11 +40,11 @@ function produce_templates()
         char_bin = 1 - char_bin; % 反转：1=白字符，0=黑背景
         char_uint8 = uint8(char_bin * 255); % 转8位格式
         
-        % 4. 保存模板
+        % 4. 保存模板（使用拼接好的相对路径）
         save_path = fullfile(template_dir, [chars{i} '.png']);
         imwrite(char_uint8, save_path);
         fprintf('已生成标准模板：%s\n', save_path);
     end
     
-    fprintf('所有标准模板生成完成！\n');
+    fprintf('所有标准模板生成完成！模板保存路径：%s\n', template_dir);
 end
