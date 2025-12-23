@@ -1,7 +1,7 @@
 """
 配置文件：定义车牌识别后端的核心路径配置
 - INPUT_IMAGES_DIR: 上传的原始图像存储目录
-- PROCESSED_IMAGES_DIR: MATLAB处理后的车牌图像存储目录
+- PROCESSED_IMAGES_DIR: OpenCV处理后的车牌图像存储目录
 - 补充通用配置（如日志级别），方便后续扩展
 """
 import os
@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # 原始上传图像存储目录（默认：backend/input_images）
 INPUT_IMAGES_DIR = os.path.join(BASE_DIR, "input_images")
 
-# MATLAB处理后的车牌图像存储目录（默认：backend/processed_images）
+# OpenCV处理后的车牌图像存储目录（默认：backend/processed_images）
 PROCESSED_IMAGES_DIR = os.path.join(BASE_DIR, "processed_images")
 
 # ==================== 可选扩展配置（保留兼容性） ====================

@@ -122,19 +122,7 @@ def test_tesseract_installation():
 
 def test_matlab_engine():
     """测试MATLAB Engine（可选）"""
-    print("\n" + "="*60)
-    print("4. 检查MATLAB Engine（可选）")
-    print("="*60)
-    
-    try:
-        import matlab.engine  # type: ignore
-        print_success("MATLAB Engine已安装")
-        print_info("MATLAB Engine是可选的，如果未安装，部分功能将不可用")
-        return True
-    except ImportError:
-        print_warning("MATLAB Engine未安装（这是可选的）")
-        print_info("如果需要使用MATLAB功能，请按照MATLAB文档安装matlab.engine")
-        return None  # 返回None表示可选依赖
+    return None
 
 def test_project_structure():
     """测试项目目录结构"""
@@ -147,7 +135,8 @@ def test_project_structure():
         'backend',
         'data/input_images',
         'data/output_results',
-        'matlab_core',
+        'opencv_core',
+        'opencv_core/char_templates',
         'frontend'
     ]
     
@@ -164,8 +153,11 @@ def test_project_structure():
     required_files = [
         'backend/main.py',
         'backend/config.py',
-        'backend/matlab_client.py',
-        'matlab_core/process_image.m'
+        'backend/image_utils.py',
+        'backend/plate_detector.py',
+        'backend/character_recognizer.py',
+        'backend/opencv_processor.py',
+        'backend/__init__.py'
     ]
     
     for file_path in required_files:
@@ -187,14 +179,12 @@ def test_backend_config():
         from backend.config import (
             TESSERACT_CMD,
             INPUT_IMAGES_DIR,
-            OUTPUT_RESULTS_DIR,
             PROCESSED_IMAGES_DIR,
             OCR_CONFIG
         )
         
         print_success("配置文件加载成功")
         print_info(f"输入图像目录: {INPUT_IMAGES_DIR}")
-        print_info(f"输出结果目录: {OUTPUT_RESULTS_DIR}")
         print_info(f"处理后图像目录: {PROCESSED_IMAGES_DIR}")
         print_info(f"OCR配置: {OCR_CONFIG}")
         
@@ -261,22 +251,24 @@ def main():
     results = {}
     
     # 运行所有测试
-    results['python_version'] = test_python_version()
-    results['core_packages'] = test_core_packages()
-    results['tesseract'] = test_tesseract_installation()
-    results['matlab'] = test_matlab_engine()  # 可选，返回None不影响
-    results['project_structure'] = test_project_structure()
+    results = {
+        'python_version': test_python_version(),
+        'core_packages': test_core_packages(),
+        'tesseract': test_tesseract_installation(),
+        'project_structure': test_project_structure()
+    }
     results['backend_config'] = test_backend_config()
     results['basic_functionality'] = test_basic_functionality()
-    
-    # 汇总结果
-    print("\n" + "="*60)
-    print("测试结果汇总")
-    print("="*60)
-    
+
+    # 打印测试结果摘要
+    print("\n" + "="*70)
+    print("环境测试结果摘要")
+    print("="*70)
+
+    all_passed = True
     required_tests = ['python_version', 'core_packages', 'tesseract', 
                      'project_structure', 'backend_config', 'basic_functionality']
-    optional_tests = ['matlab']
+    optional_tests = []
     
     all_passed = True
     for test_name in required_tests:

@@ -1,3 +1,4 @@
 """Backend package init. """
 
-__all__ = ["main", "config", "matlab_client"]
+__version__ = "1.0.0"
+__all__ = ["main", "config"]
