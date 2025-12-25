@@ -9,6 +9,7 @@ __pycache__/
 
 # Data
 data/output_results/
+data/input_images/
 *.log
 
 # Jupyter
@@ -16,3 +17,6 @@ data/output_results/
 
 # Temp files
 *.tmp
+
+test_results/
+
