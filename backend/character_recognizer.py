@@ -98,8 +98,8 @@ def load_char_templates(template_dir: str = None) -> bool:
 
 def segment_characters(plate_region: Dict[str, Any], debug: bool = False) -> List[Dict[str, Any]]:
     """
-    分割车牌字符（改进版本，专门处理小尺寸车牌图像）
-    对应MATLAB: segment_characters(plate_region)
+    电动车牌字符分割专属函数（基于模板比例定位的精准分割）
+    核心逻辑：模板比例映射 + 相对位置计算，解决边框截取不精准问题
     
     Args:
         plate_region: 包含车牌区域信息的字典
@@ -111,120 +111,178 @@ def segment_characters(plate_region: Dict[str, Any], debug: bool = False) -> Lis
             'position': 位置信息
         }
     """
+    
+    # ========== 常量定义（电动车牌标准化参数） ==========
+    # 电动车牌字符数量：8个字符（汉字2 + 字母1 + 数字5）
+    EXPECTED_CHAR_COUNT = 8
+    
+    # 模板参考尺寸（基于1mm=2像素映射的标准化尺寸）
+    TEMPLATE_WIDTH = 183    # 91.5mm × 2 = 183像素
+    TEMPLATE_HEIGHT = 362   # 181mm × 2 = 362像素
+    
+    # 电动车牌字符模板坐标（基于相对比例重新设计）
+    CHAR_TEMPLATES = [
+        # 汉字区域（"广""州"）- 2个字符，水平间距为字母数字间距的3倍
+        # 汉字中心点与字母数字区域中心点垂直对齐
+        {'name': '汉字1（广）', 'x': 50, 'y': 150, 'w': 50, 'h': 70},  # 字符1
+        {'name': '汉字2（州）', 'x': 200, 'y': 150, 'w': 50, 'h': 70},  # 字符2
+        # 字母数字区域（P53283）- 6个字符，水平间距为图像宽度的3%-8%
+        {'name': '字母1（P）', 'x': 50, 'y': 150, 'w': 40, 'h': 60},   # 字符3
+        {'name': '数字1（5）', 'x': 100, 'y': 150, 'w': 40, 'h': 60},  # 字符4
+        {'name': '数字2（3）', 'x': 150, 'y': 150, 'w': 40, 'h': 60},  # 字符5
+        {'name': '数字3（2）', 'x': 200, 'y': 150, 'w': 40, 'h': 60},  # 字符6
+        {'name': '数字4（8）', 'x': 250, 'y': 150, 'w': 40, 'h': 60},  # 字符7
+        {'name': '数字5（3）', 'x': 300, 'y': 150, 'w': 40, 'h': 60}   # 字符8
+    ]
+    
+    # ========== 子函数：图像预处理 ==========
+    def preprocess_image(image: np.ndarray) -> np.ndarray:
+        """
+        图像预处理：灰度转换 → 自适应二值化 → 形态学闭运算
+        目标：字符为白色，背景为黑色，去除噪点，补字符缝隙
+        """
+        # 1. 转灰度图
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        # 2. 自适应二值化（字符为白色，背景黑色）
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                      cv2.THRESH_BINARY, 11, 2)
+        
+        # 3. 形态学闭运算（kernel=(2,2)）去噪、补字符缝隙
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        binary_closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        
+        return binary_closed
+    
+    # ========== 子函数：计算比例缩放因子 ==========
+    def calculate_scaling_factors(plate_width: int, plate_height: int) -> tuple:
+        """
+        计算实际车牌图像与模板之间的缩放比例
+        返回：(scale_x, scale_y) - 水平和垂直方向的缩放因子
+        """
+        # 基于模板的整体尺寸和实际车牌尺寸计算缩放因子
+        # 确保所有字符都能在图像范围内
+        
+        # 模板的整体尺寸（基于字符位置和尺寸计算）
+        template_max_x = max(template['x'] + template['w'] for template in CHAR_TEMPLATES)
+        template_max_y = max(template['y'] + template['h'] for template in CHAR_TEMPLATES)
+        
+        # 计算水平和垂直方向的缩放因子
+        # 确保缩放后的字符不会超出图像边界
+        scale_x = plate_width / template_max_x * 0.9  # 留10%的边距
+        scale_y = plate_height / template_max_y * 0.9  # 留10%的边距
+        
+        # 使用较小的缩放因子，确保所有字符都能在图像内
+        scale_factor = min(scale_x, scale_y)
+        
+        if debug:
+            print(f"模板最大边界: x={template_max_x}, y={template_max_y}")
+            print(f"车牌图像尺寸: {plate_width}x{plate_height}")
+            print(f"计算缩放因子: scale_x={scale_x:.3f}, scale_y={scale_y:.3f}")
+            print(f"最终缩放因子: {scale_factor:.3f}")
+        
+        return scale_factor, scale_factor
+    
+    # ========== 主函数逻辑 ==========
     plate_image = plate_region['image']
-    
-    # 确保图像是灰度图
-    if len(plate_image.shape) == 3:
-        plate_image = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY)
-    
     h, w = plate_image.shape
     
     if debug:
-        print(f"车牌区域尺寸: {h}x{w}")
+        print(f"输入车牌图像尺寸: {h}x{w}")
+        print(f"像素范围: {plate_image.min()}-{plate_image.max()}")
     
-    # 改进字符分割方法 - 专门处理小尺寸车牌
-    # 1. 图像预处理：增强对比度
-    # 使用直方图均衡化增强对比度
-    plate_enhanced = cv2.equalizeHist(plate_image)
+    # 步骤1：图像预处理
+    plate_binary = preprocess_image(plate_image)
     
-    # 2. 自适应阈值二值化（更适合小尺寸图像）
-    plate_binary = cv2.adaptiveThreshold(plate_enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY, 5, 2)
+    if debug:
+        print(f"二值化后像素范围: {plate_binary.min()}-{plate_binary.max()}")
     
-    # 3. 反转二值化结果，使字符为白色，背景为黑色
-    plate_binary = cv2.bitwise_not(plate_binary)
+    # 步骤2：计算比例缩放因子
+    scale_x, scale_y = calculate_scaling_factors(w, h)
     
-    # 4. 形态学操作去除小噪点
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-    plate_binary = cv2.morphologyEx(plate_binary, cv2.MORPH_OPEN, kernel)
-    
-    # 5. 垂直投影法精确定位字符边界
-    vertical_proj = np.sum(plate_binary, axis=0)
-    
-    # 对于小尺寸图像，使用更小的平滑核
-    kernel_size = max(1, w // 15)  # 动态调整核大小
-    kernel = np.ones(kernel_size, dtype=np.float32) / kernel_size
-    proj_smoothed = np.convolve(vertical_proj, kernel, mode='same')
-    
-    # 计算差分找峰值（字符边界）
-    diff_proj = np.diff(proj_smoothed)
-    
-    # 找到字符边界（从负变正的位置是字符开始，从正变负是字符结束）
-    char_starts = np.where((diff_proj[:-1] < 0) & (diff_proj[1:] > 0))[0] + 1
-    char_ends = np.where((diff_proj[:-1] > 0) & (diff_proj[1:] < 0))[0] + 1
-    
-    # 确保字符边界数量匹配
-    if len(char_starts) > len(char_ends):
-        char_starts = char_starts[:len(char_ends)]
-    elif len(char_ends) > len(char_starts):
-        char_ends = char_ends[:len(char_starts)]
-    
+    # 步骤3：基于模板比例的精确定位（核心逻辑）
     characters = []
     
-    # 对于小尺寸车牌，使用更宽松的字符数量判断
-    if len(char_starts) >= 5:  # 至少找到5个字符边界
-        # 取前7个字符（如果不足7个，则取所有）
-        char_starts = char_starts[:min(7, len(char_starts))]
-        char_ends = char_ends[:min(7, len(char_ends))]
+    for i, template in enumerate(CHAR_TEMPLATES):
+        # 3.1 根据缩放因子计算实际字符位置和尺寸
+        real_x = int(template['x'] * scale_x)
+        real_y = int(template['y'] * scale_y)
+        real_w = int(template['w'] * scale_x)
+        real_h = int(template['h'] * scale_y)
         
-        for i, (start, end) in enumerate(zip(char_starts, char_ends)):
-            # 提取字符区域（稍微扩大边界）
-            char_width = end - start
-            expand = max(1, char_width // 4)  # 扩大25%的宽度
+        # 3.2 确保字符尺寸在合理范围内
+        # 字符宽度：车牌宽度的1/8到1/12
+        min_char_width = w // 12
+        max_char_width = w // 8
+        real_w = max(min_char_width, min(real_w, max_char_width))
+        
+        # 字符高度：车牌高度的1/3到1/2
+        min_char_height = h // 3
+        max_char_height = h // 2
+        real_h = max(min_char_height, min(real_h, max_char_height))
+        
+        # 3.3 处理坐标越界
+        real_x = max(0, real_x)
+        real_y = max(0, real_y)
+        
+        # 确保宽度和高度不超出图像边界
+        if real_x + real_w > w:
+            real_w = w - real_x
+        if real_y + real_h > h:
+            real_h = h - real_y
+        
+        # 3.4 提取字符区域（从原始车牌图）
+        if real_w > 0 and real_h > 0:
+            char_region = plate_image[real_y:real_y+real_h, real_x:real_x+real_w]
             
-            start_col = max(0, start - expand)
-            end_col = min(w, end + expand)
-            
-            # 提取字符区域
-            char_region = plate_binary[:, start_col:end_col]
-            
-            # 如果字符区域太小，使用固定宽度
-            if char_region.shape[1] < 3:
-                char_width = max(3, w // 8)
-                start_col = max(0, start - char_width // 2)
-                end_col = min(w, start + char_width // 2)
-                char_region = plate_binary[:, start_col:end_col]
-            
-            # 调整字符大小到标准尺寸
+            # 调整到标准尺寸（20×40像素）
             if char_region.size > 0:
-                # 对于小尺寸图像，使用更精细的插值
                 char_img = cv2.resize(char_region, (20, 40), interpolation=cv2.INTER_CUBIC)
             else:
-                # 创建空白图像
                 char_img = np.zeros((40, 20), dtype=np.uint8)
             
             characters.append({
                 'image': char_img,
-                'position': (start_col, 0, end_col - start_col, h)
+                'position': (real_x, real_y, real_w, real_h)
             })
-    else:
-        # 如果垂直投影法失败，使用固定分割
+            
+            if debug:
+                print(f"  字符{i+1}({template['name']}): ")
+                print(f"    模板位置: ({template['x']}, {template['y']}, {template['w']}, {template['h']})")
+                print(f"    实际位置: ({real_x}, {real_y}, {real_w}, {real_h})")
+        else:
+            if debug:
+                print(f"  字符{i+1}({template['name']}): 坐标越界，跳过")
+    
+    # 步骤4：验证分割结果
+    if len(characters) < EXPECTED_CHAR_COUNT:
         if debug:
-            print("垂直投影法失败，使用固定分割")
-        
-        char_width = max(3, w // 7)  # 确保最小宽度
-        for i in range(7):
-            start_col = i * char_width
-            end_col = min((i + 1) * char_width, w)
-            
-            # 提取字符区域
-            char_region = plate_binary[:, start_col:end_col]
-            
-            # 调整字符大小
-            if char_region.size > 0:
-                char_img = cv2.resize(char_region, (20, 40), interpolation=cv2.INTER_CUBIC)
-            else:
-                char_img = np.zeros((40, 20), dtype=np.uint8)
-            
-            characters.append({
-                'image': char_img,
-                'position': (start_col, 0, end_col - start_col, h)
-            })
+            print(f"警告: 只分割出 {len(characters)} 个字符，期望 {EXPECTED_CHAR_COUNT} 个")
     
     if debug:
         print(f"成功分割出 {len(characters)} 个字符")
-        for i, char_info in enumerate(characters):
-            print(f"  字符{i}: 位置 {char_info['position']}, 尺寸 {char_info['image'].shape}")
+        
+        # 计算字符间距分布
+        if len(characters) > 1:
+            spacings = []
+            for i in range(1, len(characters)):
+                prev_char_end = characters[i-1]['position'][0] + characters[i-1]['position'][2]
+                curr_char_start = characters[i]['position'][0]
+                spacing = curr_char_start - prev_char_end
+                spacings.append(spacing)
+            
+            if spacings:
+                avg_spacing = sum(spacings) / len(spacings)
+                std_spacing = (sum((s - avg_spacing) ** 2 for s in spacings) / len(spacings)) ** 0.5
+                print(f"平均字符间距: {avg_spacing:.1f} 像素")
+                print(f"间距标准差: {std_spacing:.1f} 像素")
+                if std_spacing < 10:
+                    print("✓ 字符分布均匀")
+                else:
+                    print("⚠ 字符分布不均匀")
     
     return characters
 
