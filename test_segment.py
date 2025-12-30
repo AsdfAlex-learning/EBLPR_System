@@ -131,7 +131,7 @@ def run_segment_test():
     
     print(f"    -> 归一化后尺寸: {target_w} x {target_h}")
 
-    # 3.2 图像增强 (高斯模糊 + 二值化 + 形态学)
+    # 3.2 图像增强 (高斯模糊 + 二值化 + 椒盐去噪 + 形态学)
     # 高斯模糊
     blurred = cv2.GaussianBlur(plate_img_gray, (3, 3), 0)
     
@@ -146,6 +146,10 @@ def run_segment_test():
     if border_mean > 127:
         print("    -> 检测到白底，自动反转为黑底白字...")
         plate_binary = cv2.bitwise_not(plate_binary)
+
+    # [新增] 椒盐去噪 (中值滤波)
+    # 在二值化和反转之后进行，去除孤立的噪点
+    plate_binary = cv2.medianBlur(plate_binary, 3)
     
     # 形态学操作 (开运算去除噪点)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
@@ -195,14 +199,64 @@ def run_segment_test():
         real_w = x2 - x1
         real_h = y2 - y1
         
-        # 4.1 保存单独的字符图片 (使用处理后的二值图)
+        # [新增] 二次筛选逻辑：在粗略框内部寻找最佳连通域
+        if real_w > 0 and real_h > 0:
+            # 先画粗略框 (蓝色) 作为对比
+            cv2.rectangle(plate_img_color, (x1, y1), (x2, y2), (255, 0, 0), 1)
+            
+            char_roi_rough = plate_processed[y1:y2, x1:x2]
+            
+            # 查找轮廓
+            contours, _ = cv2.findContours(char_roi_rough, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            best_rect = None
+            max_score = -1
+            
+            roi_h, roi_w = char_roi_rough.shape
+            roi_center_x, roi_center_y = roi_w / 2, roi_h / 2
+            
+            for cnt in contours:
+                cx, cy, cw, ch = cv2.boundingRect(cnt)
+                
+                # 过滤太小的噪点 (例如面积小于 20)
+                if cw * ch < 20: continue
+                
+                # 计算得分
+                # 1. 面积 (越大越好)
+                area = cw * ch
+                
+                # 2. 距离中心点的距离 (越近越好)
+                cnt_center_x = cx + cw / 2
+                cnt_center_y = cy + ch / 2
+                dist = ((cnt_center_x - roi_center_x)**2 + (cnt_center_y - roi_center_y)**2)**0.5
+                
+                # 得分公式：面积 / (1 + 权重 * 距离)
+                # 权重 0.1 意味着距离每增加 10px，得分衰减约一半 (假设面积相似)
+                score = area / (1 + 0.1 * dist)
+                
+                if score > max_score:
+                    max_score = score
+                    best_rect = (cx, cy, cw, ch)
+            
+            # 如果找到了更好的框，更新 x1, y1, x2, y2
+            if best_rect:
+                rx, ry, rw, rh = best_rect
+                # 更新为全局坐标
+                # 注意：rx, ry 是相对于 rough_roi 的
+                x1 = x1 + rx
+                y1 = y1 + ry
+                x2 = x1 + rw
+                y2 = y1 + rh
+                real_w, real_h = rw, rh
+        
+        # 4.1 保存单独的字符图片 (使用最终的 x1, y1, x2, y2)
         if real_w > 0 and real_h > 0:
             char_img = plate_processed[y1:y2, x1:x2]
             char_filename = output_dir / f"char_{name}.png"
             cv2.imwrite(str(char_filename), char_img)
             # print(f"  -> 保存字符: {name} ({real_w}x{real_h})") # 用户要求不需要展示处理步骤
         
-        # 4.2 在总览图上画框 (彩色图)
+        # 4.2 在总览图上画最终框 (绿色)
         color = (0, 255, 0) 
         thickness = 2
         cv2.rectangle(plate_img_color, (x1, y1), (x2, y2), color, thickness)
