@@ -5,20 +5,39 @@
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Optional
 
-# 字符模板定义（百分比坐标）
-CHAR_TEMPLATES = [
-    # 汉字区域 
-    {'name': '汉字1', 'x': 37.88, 'y': 3.49, 'w': 20.06, 'h': 41.85}, 
-    {'name': '汉字2', 'x': 55.28, 'y': 3.49, 'w': 20.06, 'h': 41.85}, 
-    # 字母数字区域 8
-    {'name': '字符1', 'x': 13.94, 'y': 45.91, 'w': 20.76, 'h': 47.94}, 
-    {'name': '字符2', 'x': 24.39, 'y': 45.91, 'w': 20.76, 'h': 47.94}, 
-    {'name': '字符3', 'x': 34.85, 'y': 45.91, 'w': 20.76, 'h': 47.94}, 
-    {'name': '字符4', 'x': 45.31, 'y': 45.91, 'w': 20.76, 'h': 47.94}, 
-    {'name': '字符5', 'x': 55.76, 'y': 45.91, 'w': 20.76, 'h': 47.94}, 
-    {'name': '字符6', 'x': 66.22, 'y': 45.91, 'w': 20.76, 'h': 47.94} 
+# ==========================================
+# [默认参数设置] - 可在外部修改
+# ==========================================
+
+# 字符框宽高比设置
+# 下层字符 (数字/字母) 比例：1.55 (用户指定)
+RATIO_BOTTOM = 1.55
+# 上层字符 (汉字/字母) 比例：0.95 (默认方形略扁)
+RATIO_TOP = 0.95
+
+# 字符分割配置 (双层车牌 8 字符模板)
+CHAR_CONFIGS = [
+    # --- 第一行 (Top Row) ---
+    # 字符 1 (汉字，如 "苏")
+    {'name': '01_top_1', 'center_x': 0.37, 'center_y': 0.25, 'w': 0.18},
+    # 字符 2 (字母，如 "E")
+    {'name': '02_top_2', 'center_x': 0.62, 'center_y': 0.25, 'w': 0.18},
+    
+    # --- 第二行 (Bottom Row) ---
+    # 字符 3
+    {'name': '03_bottom_1', 'center_x': 0.1, 'center_y': 0.70, 'w': 0.15},
+    # 字符 4
+    {'name': '04_bottom_2', 'center_x': 0.26, 'center_y': 0.70, 'w': 0.15},
+    # 字符 5
+    {'name': '05_bottom_3', 'center_x': 0.42, 'center_y': 0.70, 'w': 0.15},
+    # 字符 6
+    {'name': '06_bottom_4', 'center_x': 0.58, 'center_y': 0.70, 'w': 0.15},
+    # 字符 7
+    {'name': '07_bottom_5', 'center_x': 0.74, 'center_y': 0.70, 'w': 0.15},
+    # 字符 8
+    {'name': '08_bottom_6', 'center_x': 0.902, 'center_y': 0.70, 'w': 0.15},
 ]
 
 class CharacterRecognizer:
@@ -40,310 +59,287 @@ class CharacterRecognizer:
             template_name = template_file.stem
             template_img = cv2.imread(str(template_file), cv2.IMREAD_GRAYSCALE)
             if template_img is not None:
+                # 确保模板大小也是 40x60，或者在匹配时统一
                 templates[template_name] = template_img
                 
         return templates
 
-    def recognize(self, plate_image: np.ndarray, debug_output_dir: Path = None) -> str:
+    def recognize(self, plate_image: np.ndarray, debug_output_dir: Optional[Path] = None, 
+                  configs: List[Dict] = None, ratio_bottom: float = None, ratio_top: float = None) -> str:
         """
         识别车牌图像中的字符
         Args:
             plate_image: 车牌灰度图像
-            debug_output_dir: 调试输出目录，如果提供则保存中间结果
+            debug_output_dir: 调试输出目录
+            configs: 可选，覆盖默认的 CHAR_CONFIGS
+            ratio_bottom: 可选，覆盖默认的 RATIO_BOTTOM
+            ratio_top: 可选，覆盖默认的 RATIO_TOP
             
         Returns:
             str: 识别出的车牌号码
         """
         if plate_image is None:
             return ""
-            
-        # 1. 预处理与特征提取
-        # 二值化处理
-        _, binary = cv2.threshold(plate_image, 85, 255, cv2.THRESH_BINARY)
+
+        # 使用传入的配置或默认配置
+        current_configs = configs if configs is not None else CHAR_CONFIGS
+        current_ratio_bottom = ratio_bottom if ratio_bottom is not None else RATIO_BOTTOM
+        current_ratio_top = ratio_top if ratio_top is not None else RATIO_TOP
         
-        # 保存中间结果
+        # --- 图像预处理增强 ---
+        # 0. 尺寸归一化 (关键步骤：与调试脚本保持一致)
+        # 固定高度为 140px，宽度按比例缩放
+        target_h = 140
+        h_raw, w_raw = plate_image.shape
+        scale = target_h / h_raw
+        target_w = int(w_raw * scale)
+        
+        plate_image_resized = cv2.resize(plate_image, (target_w, target_h))
+        
+        # 1. 高斯模糊去噪
+        blurred = cv2.GaussianBlur(plate_image_resized, (3, 3), 0)
+        
+        # 2. 二值化
+        # 用户说明：Otsu 会忽略第二个参数(140)，如果需要手动调整阈值，请移除 cv2.THRESH_OTSU
+        # _, binary_plate = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 使用 THRESH_BINARY_INV (反转) 来让白底黑字变为黑底白字？
+        # 不，通常车牌是蓝底白字 -> 二值化后字是白，底是黑。
+        # 如果是白底黑字的车牌，THRESH_BINARY 会得到白底黑字。
+        # 我们这里统一使用 THRESH_BINARY，然后智能反转背景。
+        _, binary_plate = cv2.threshold(blurred, 140, 255, cv2.THRESH_BINARY)
+        
+        # [新增] 智能背景反转：确保是黑底白字
+        # 检查边缘像素，如果是白色，说明背景是白，需要反转
+        h_bin, w_bin = binary_plate.shape
+        border_mean = (np.mean(binary_plate[0, :]) + np.mean(binary_plate[h_bin-1, :]) + 
+                       np.mean(binary_plate[:, 0]) + np.mean(binary_plate[:, w_bin-1])) / 4.0
+                       
+        if border_mean > 127:
+            # print("  [Debug] Detected White Background, Inverting to Black Background...")
+            binary_plate = cv2.bitwise_not(binary_plate)
+        
+        # 3. 形态学操作 (开运算去除细小噪点)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        processed_plate = cv2.morphologyEx(binary_plate, cv2.MORPH_OPEN, kernel)
+        
+        # 使用处理后的图像进行分割和识别
+        # 注意：这里我们使用 processed_plate 替代原始的 plate_image
+        plate_h, plate_w = processed_plate.shape
+        
+        recognition_results = {}
+        
         if debug_output_dir:
             debug_output_dir.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(debug_output_dir / "binary.png"), binary)
+            # 保存原图
+            cv2.imwrite(str(debug_output_dir / "plate_input.png"), plate_image)
+            cv2.imwrite(str(debug_output_dir / "plate_processed.png"), processed_plate)
+
+        # 遍历每个配置的字符框进行分割和识别
+        for cfg in current_configs:
+            name = cfg['name']
+            cx_pct = cfg['center_x']
+            cy_pct = cfg['center_y']
+            w_pct = cfg['w']
             
-        # 双重降噪
-        # 1.1 连通区域分析降噪
-        binary_cca = self._remove_noise_by_connected_component_analysis(binary, min_area=10)
+            # 确定使用哪个宽高比
+            if 'top' in name:
+                ratio = current_ratio_top
+            else:
+                ratio = current_ratio_bottom
+            
+            # 计算像素坐标
+            box_w = int(plate_w * w_pct)
+            box_h = int(box_w * ratio)
+            
+            center_x = int(plate_w * cx_pct)
+            center_y = int(plate_h * cy_pct)
+            
+            x1 = center_x - box_w // 2
+            y1 = center_y - box_h // 2
+            
+            # 边界检查
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(plate_w, x1 + box_w)
+            y2 = min(plate_h, y1 + box_h)
+            
+            # 提取字符图像
+            if x2 > x1 and y2 > y1:
+                # 使用处理后的二值图像进行切割
+                char_img = processed_plate[y1:y2, x1:x2]
+                
+                if debug_output_dir:
+                    cv2.imwrite(str(debug_output_dir / f"cut_{name}.png"), char_img)
+                
+                # 识别单个字符
+                char_code, confidence = self._recognize_single_char(char_img, name)
+                recognition_results[name] = {
+                    'char': char_code,
+                    'conf': confidence,
+                    'box': (x1, y1, x2, y2)
+                }
+            else:
+                recognition_results[name] = {'char': "?", 'conf': 0.0, 'box': (0, 0, 0, 0)}
+
+        # 结果修正 (佛山/广州逻辑)
+        self._apply_plate_logic(recognition_results)
         
-        # 1.2 形态学开运算降噪
-        binary_denoised = self._remove_noise_by_morphological_opening(binary_cca, kernel_size=3)
+        # --- 调试输出增强 ---
+        print("\n" + "="*30)
+        print(" [详细识别结果]")
+        print(f" {'位置':<15} | {'字符':<5} | {'置信度':<10}")
+        print("-" * 35)
         
+        # 准备调试绘图 (转为彩色以便绘制彩色文字)
+        debug_vis_img = None
         if debug_output_dir:
-            cv2.imwrite(str(debug_output_dir / "binary_denoised.png"), binary_denoised)
+            debug_vis_img = cv2.cvtColor(processed_plate, cv2.COLOR_GRAY2BGR)
+
+        sorted_keys = sorted(recognition_results.keys())
+        for key in sorted_keys:
+            res = recognition_results[key]
+            char_str = res['char']
+            conf_val = res['conf']
+            print(f" {key:<15} | {char_str:<5} | {conf_val:.4f}")
             
-        # 2. 定位黑色连续像素区域
-        black_regions = self._find_continuous_black_regions(binary_denoised, min_pixels=2900, min_width=40, min_height=60)
-        black_centroids = self._calculate_centroids(black_regions)
+            # 绘制到调试图
+            if debug_vis_img is not None and res['box'][2] > 0:
+                x1, y1, x2, y2 = res['box']
+                # 画框
+                cv2.rectangle(debug_vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # 写字 (字符 + 置信度)
+                label = f"{char_str}:{conf_val:.2f}"
+                # 为了防止文字出界，根据位置调整
+                text_y = y1 - 10 if y1 > 20 else y2 + 20
+                cv2.putText(debug_vis_img, label, (x1, text_y), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        print("="*30 + "\n")
         
-        # 3. 靠边筛选
-        edge_filtered_regions, edge_filtered_centroids = self._filter_edge_regions(
-            black_regions, black_centroids, plate_image.shape[1], plate_image.shape[0], 
-            margin_ratio=0.05, margin_pixels=20
-        )
-        
-        # 4. 基于字符模板相对位置进行筛选
-        filtered_regions, filtered_centroids, _ = self._filter_by_template_matching_with_fallback(
-            edge_filtered_regions, edge_filtered_centroids, plate_image.shape[1], plate_image.shape[0]
-        )
-        
-        if not filtered_regions:
-            print("❌ 未找到有效的字符区域")
-            return ""
-            
-        # 5. 字符识别
-        recognition_results = self._recognize_characters_from_regions(
-            filtered_regions, filtered_centroids, binary_denoised, 
-            plate_image.shape[1], plate_image.shape[0]
-        )
-        
-        # 6. 结果整合与修正
-        plate_number = self._process_results(recognition_results)
-        
+        if debug_output_dir and debug_vis_img is not None:
+            cv2.imwrite(str(debug_output_dir / "plate_recog_debug_vis.png"), debug_vis_img)
+
+        # 整合结果
+        plate_number = self._format_result(recognition_results)
         return plate_number
 
-    def _remove_noise_by_connected_component_analysis(self, binary_image, min_area=10):
-        denoised_image = binary_image.copy()
-        inverted = cv2.bitwise_not(binary_image)
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(inverted, connectivity=8, ltype=cv2.CV_32S)
+    def _apply_plate_logic(self, results: Dict[str, Dict]):
+        """应用特殊的车牌逻辑修正结果"""
+        # 获取前两个字符 (假设是 01_top_1 和 02_top_2)
+        # results 结构: {'01_top_1': {'char': '广', 'conf': 0.8, ...}, ...}
         
-        for label in range(1, num_labels):
-            area = stats[label, cv2.CC_STAT_AREA]
-            if area < min_area:
-                mask = (labels == label).astype(np.uint8) * 255
-                denoised_image[mask > 0] = 255
-        return denoised_image
-
-    def _remove_noise_by_morphological_opening(self, binary_image, kernel_size=3):
-        inverted = cv2.bitwise_not(binary_image)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-        eroded = cv2.erode(inverted, kernel, iterations=1)
-        opened = cv2.dilate(eroded, kernel, iterations=1)
-        return cv2.bitwise_not(opened)
-
-    def _find_continuous_black_regions(self, binary_image, min_pixels=300, min_width=180, min_height=270):
-        inverted = cv2.bitwise_not(binary_image)
-        contours, _ = cv2.findContours(inverted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        r1 = results.get('01_top_1')
+        r2 = results.get('02_top_2')
         
-        filtered_regions = []
-        for i, contour in enumerate(contours):
-            area = cv2.contourArea(contour)
-            x, y, w, h = cv2.boundingRect(contour)
-            
-            region_info = {
-                'index': i,
-                'area': area,
-                'bounding_box': (x, y, w, h),
-                'contour': contour,
-                'width': w,
-                'height': h
-            }
-            
-            if area >= min_pixels and w >= min_width and h >= min_height:
-                filtered_regions.append(region_info)
-                
-        return filtered_regions
+        if not r1 or not r2:
+            return
 
-    def _calculate_centroids(self, regions):
-        centroids = []
-        for region in regions:
-            contour = region['contour']
-            M = cv2.moments(contour)
-            if M['m00'] != 0:
-                cx = int(M['m10'] / M['m00'])
-                cy = int(M['m01'] / M['m00'])
-                centroids.append((cx, cy))
-            else:
-                x, y, w, h = region['bounding_box']
-                cx = x + w // 2
-                cy = y + h // 2
-                centroids.append((cx, cy))
-        return centroids
-
-    def _filter_edge_regions(self, regions, centroids, image_width, image_height, margin_ratio=0.05, margin_pixels=20):
-        if not regions or not centroids:
-            return [], []
-            
-        left_margin = max(int(image_width * margin_ratio), margin_pixels)
-        right_margin = image_width - left_margin
-        top_margin = max(int(image_height * margin_ratio), margin_pixels)
-        bottom_margin = image_height - top_margin
+        c1 = r1['char']
+        c2 = r2['char']
         
-        filtered_regions = []
-        filtered_centroids = []
-        
-        for region, centroid in zip(regions, centroids):
-            cx, cy = centroid
-            is_edge = (cx < left_margin or cx > right_margin or 
-                       cy < top_margin or cy > bottom_margin)
+        # 逻辑：如果含有 佛 或 山 -> 佛山
+        if c1 in ['佛', '山'] or c2 in ['佛', '山']:
+            r1['char'] = '佛'
+            r2['char'] = '山'
+            # 可选：标记为逻辑修正
+            r1['logic_fixed'] = True
+            r2['logic_fixed'] = True
             
-            if not is_edge:
-                filtered_regions.append(region)
-                filtered_centroids.append(centroid)
-                
-        return filtered_regions, filtered_centroids
+        # 逻辑：如果含有 广 或 州 -> 广州
+        elif c1 in ['广', '州'] or c2 in ['广', '州']:
+            r1['char'] = '广'
+            r2['char'] = '州'
+            r1['logic_fixed'] = True
+            r2['logic_fixed'] = True
 
-    def _adjust_template_spacing(self, templates, spacing_factor):
-        adjusted_templates = []
-        for template in templates[:2]:
-            adjusted_templates.append(template.copy())
-            
-        char_templates = templates[2:8]
-        char_centers = []
-        for template in char_templates:
-            center_x = template['x'] + template['w'] / 2
-            center_y = template['y'] + template['h'] / 2
-            char_centers.append((center_x, center_y))
-            
-        if len(char_centers) > 1:
-            total_spacing = 0
-            for i in range(len(char_centers) - 1):
-                spacing = char_centers[i+1][0] - char_centers[i][0]
-                total_spacing += spacing
-            avg_spacing = total_spacing / (len(char_centers) - 1)
+    def _recognize_single_char(self, char_img: np.ndarray, char_pos_name: str) -> Tuple[str, float]:
+        """
+        识别单个字符图像
+        结合多种方法：
+        1. 模板匹配 (Template Matching) - 适用于形状和位置比较固定的情况
+        2. 特征匹配 (Hu Moments / SIFT) - 对位置、缩放、旋转不敏感
+        """
+        
+        # --- 1. 预处理 ---
+        # 调整到模板大小
+        target_size = (40, 60)
+        char_resized = cv2.resize(char_img, target_size)
+        
+        # --- 2. 准备候选模板 ---
+        # 定义汉字模板关键字
+        chinese_keys = ['guangdong', 'zhou', 'foshan', 'shan', 'guang', 'fo']
+        
+        # 确定当前框允许的字符类型
+        allow_chinese = False
+        allow_alphanum = False
+        
+        if 'top' in char_pos_name:
+            allow_chinese = True
         else:
-            avg_spacing = 0
+            allow_alphanum = True
             
-        new_spacing = avg_spacing * spacing_factor
+        best_score = -1.0 # 综合评分 (越高越好)
+        best_char = "?"
         
-        for i, template in enumerate(char_templates):
-            adjusted_template = template.copy()
-            if i == 0:
-                adjusted_template['x'] = char_centers[i][0] - template['w'] / 2 - (new_spacing - avg_spacing) * 1.5
-            elif i == 5:
-                adjusted_template['x'] = char_centers[i][0] - template['w'] / 2 + (new_spacing - avg_spacing) * 1.5
-            else:
-                offset = (new_spacing - avg_spacing) * (i - 2.5)
-                adjusted_template['x'] = char_centers[i][0] - template['w'] / 2 + offset
-            adjusted_templates.append(adjusted_template)
+        # --- 3. 遍历模板进行匹配 ---
+        for template_name, template_img in self.templates.items():
+            # 过滤逻辑
+            is_chinese_template = any(k in template_name for k in chinese_keys)
+            if allow_chinese and not is_chinese_template: continue
+            if allow_alphanum and is_chinese_template: continue
             
-        return adjusted_templates
+            # 确保模板也是 target_size
+            if template_img.shape != target_size:
+                template_img = cv2.resize(template_img, target_size)
+            
+            # === 方法 A: 优化的模板匹配 (允许微小平移) ===
+            # 不是只匹配一次，而是在小范围内滑动匹配
+            # 这里的 matchTemplate 本身就是滑动匹配，但前提是 char_resized 要比 template_img 大
+            # 由于我们强制 resize 成了一样大，所以 matchTemplate 退化成了像素对比。
+            # 改进：将 char_img resize 得稍微大一点点 (比如 44x64)，然后用 40x60 的模板去匹配
+            # 这样允许 4px 的位移容错。
+            
+            search_h, search_w = 64, 44
+            char_search = cv2.resize(char_img, (search_w, search_h))
+            
+            res = cv2.matchTemplate(char_search, template_img, cv2.TM_CCOEFF_NORMED)
+            tm_score = float(np.max(res))
+            
+            # === 方法 B: 轮廓特征匹配 (Hu Moments) - 可选 ===
+            # Hu 矩对平移、缩放、旋转不变。
+            # cv2.matchShapes 返回值越小越相似 (0是完全相同)
+            # hu_score_raw = cv2.matchShapes(char_resized, template_img, cv2.CONTOURS_MATCH_I1, 0)
+            # hu_score = 1.0 / (1.0 + hu_score_raw) # 转换为 0-1 分数 (越高越好)
+            
+            # === 综合评分 ===
+            # 目前先主要信赖允许位移的模板匹配
+            final_score = tm_score 
+            
+            # 如果是汉字，由于笔画复杂，可以适当降低对位置的敏感度
+            # if is_chinese_template:
+            #     final_score = 0.7 * tm_score + 0.3 * hu_score
+            
+            if final_score > best_score:
+                best_score = final_score
+                best_char = template_name
+        
+        # 映射回真实字符
+        char_map = {
+            'guangdong': '广', 'zhou': '州', 'foshan': '佛', 'shan': '山',
+            'guang': '广', 'fo': '佛'
+        }
+        final_char = char_map.get(best_char, best_char)
+        
+        return final_char, best_score
 
-    def _filter_by_template_matching_with_fallback(self, regions, centroids, image_width, image_height):
-        if not regions or not centroids:
-            return [], [], 1.0
-            
-        spacing_factors = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    def _format_result(self, results: Dict[str, Dict]) -> str:
+        """将识别结果字典转换为字符串"""
+        # 按照配置顺序排序
+        sorted_keys = sorted(results.keys())
         
-        for spacing_factor in spacing_factors:
-            adjusted_templates = self._adjust_template_spacing(CHAR_TEMPLATES, spacing_factor)
+        final_str = ""
+        for key in sorted_keys:
+            final_str += results[key]['char']
             
-            template_boxes = []
-            for template in adjusted_templates:
-                x_px = int(template['x'] / 100 * image_width)
-                y_px = int(template['y'] / 100 * image_height)
-                w_px = int(template['w'] / 100 * image_width)
-                h_px = int(template['h'] / 100 * image_height)
-                
-                template_boxes.append({
-                    'name': template['name'],
-                    'x': x_px, 'y': y_px, 'w': w_px, 'h': h_px
-                })
-            
-            template_matches = {}
-            for template in template_boxes:
-                template_matches[template['name']] = False
-                for centroid in centroids:
-                    cx, cy = centroid
-                    if (template['x'] <= cx <= template['x'] + template['w'] and
-                        template['y'] <= cy <= template['y'] + template['h']):
-                        template_matches[template['name']] = True
-                        break
-            
-            if all(template_matches.values()):
-                filtered_regions = []
-                filtered_centroids = []
-                for region, centroid in zip(regions, centroids):
-                    cx, cy = centroid
-                    in_any_template = False
-                    for template in template_boxes:
-                        if (template['x'] <= cx <= template['x'] + template['w'] and
-                            template['y'] <= cy <= template['y'] + template['h']):
-                            in_any_template = True
-                            break
-                    if in_any_template:
-                        filtered_regions.append(region)
-                        filtered_centroids.append(centroid)
-                return filtered_regions, filtered_centroids, spacing_factor
-                
-        return [], [], 1.0
+        return final_str
 
-    def _recognize_characters_from_regions(self, filtered_regions, filtered_centroids, binary_denoised, image_width, image_height):
-        recognition_results = {}
-        adjusted_templates = self._adjust_template_spacing(CHAR_TEMPLATES, 1.0)
-        
-        for template in adjusted_templates:
-            x_px = int(template['x'] / 100 * image_width)
-            y_px = int(template['y'] / 100 * image_height)
-            w_px = int(template['w'] / 100 * image_width)
-            h_px = int(template['h'] / 100 * image_height)
-            
-            template_regions = []
-            for region, centroid in zip(filtered_regions, filtered_centroids):
-                cx, cy = centroid
-                if (x_px <= cx <= x_px + w_px and y_px <= cy <= y_px + h_px):
-                    template_regions.append(region)
-            
-            if template_regions:
-                best_match = None
-                best_similarity = -1
-                best_char = None
-                chinese_templates = ['guangdong', 'zhou', 'foshan', 'shan', 'guang', 'fo', 'shan']
-                
-                for region in template_regions:
-                    x, y, w, h = region['bounding_box']
-                    char_region = binary_denoised[y:y+h, x:x+w]
-                    char_resized = cv2.resize(char_region, (40, 60))
-                    
-                    for template_name, template_img in self.templates.items():
-                        if template['name'] in ['汉字1', '汉字2']:
-                            if template_name not in chinese_templates:
-                                continue
-                                
-                        similarity = cv2.matchTemplate(char_resized, template_img, cv2.TM_CCOEFF_NORMED)
-                        max_similarity = np.max(similarity)
-                        
-                        if max_similarity > best_similarity:
-                            best_similarity = max_similarity
-                            best_match = region
-                            best_char = template_name
-                            
-                if best_char:
-                    char_map = {'guangdong': '广', 'zhou': '州', 'foshan': '佛', 'shan': '山'}
-                    final_char = char_map.get(best_char, best_char)
-                    recognition_results[template['name']] = {
-                        'character': final_char,
-                        'similarity': best_similarity,
-                        'region': best_match
-                    }
-                    
-        return recognition_results
-
-    def _process_results(self, recognition_results):
-        template_order = ['汉字1', '汉字2', '字符1', '字符2', '字符3', '字符4', '字符5', '字符6']
-        corrected_results = recognition_results.copy()
-        
-        # 汉字修正逻辑
-        if '汉字1' in recognition_results and '汉字2' in recognition_results:
-            char1 = recognition_results['汉字1']['character']
-            char2 = recognition_results['汉字2']['character']
-            
-            if char1 in ['fo', 'shan'] or char2 in ['fo', 'shan']:
-                corrected_results['汉字1']['character'] = '佛'
-                corrected_results['汉字2']['character'] = '山'
-            elif char1 in ['guang', 'zhou'] or char2 in ['guang', 'zhou']:
-                corrected_results['汉字1']['character'] = '广'
-                corrected_results['汉字2']['character'] = '州'
-        
-        plate_number = ""
-        for template_name in template_order:
-            if template_name in corrected_results:
-                plate_number += corrected_results[template_name]['character']
-            else:
-                plate_number += "?"
-                
-        return plate_number

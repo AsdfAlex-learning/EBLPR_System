@@ -22,9 +22,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     """
     h_orig, w_orig = image.shape
     
-    # ==========================================
-    # 参数设置 (源自 debug_plate_detector.py)
-    # ==========================================
     TARGET_WIDTH = 800
     CROP_RATIO_W = 0.20         # 左右各裁剪掉 20%
     CROP_RATIO_H = 0.20         # 上下各裁剪掉 20%
@@ -43,9 +40,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     REFINE_PAD_W = 0.2
     REFINE_PAD_H = 0.5
     
-    # ==========================================
-    # Step 0: 归一化
-    # ==========================================
     scale = TARGET_WIDTH / w_orig
     target_height = int(h_orig * scale)
     resized = cv2.resize(image, (TARGET_WIDTH, target_height))
@@ -54,9 +48,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
         debug_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(debug_dir / "00_original_resized.png"), resized)
 
-    # ==========================================
-    # Step 1: 中心裁剪
-    # ==========================================
     crop_x = int(TARGET_WIDTH * CROP_RATIO_W)
     crop_y = int(target_height * CROP_RATIO_H)
     crop_w = TARGET_WIDTH - 2 * crop_x
@@ -67,9 +58,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "01_center_crop.png"), cropped)
 
-    # ==========================================
-    # Step 2: 边缘检测 (双向 Sobel)
-    # ==========================================
     blurred = cv2.GaussianBlur(cropped, (5, 5), 0)
     
     # Sobel X (垂直边缘)
@@ -86,9 +74,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "02_sobel.png"), combined_sobel)
 
-    # ==========================================
-    # Step 3: 二值化 & 预膨胀
-    # ==========================================
     ret, binary = cv2.threshold(combined_sobel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
     if debug and debug_dir:
@@ -98,26 +83,7 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     binary = cv2.dilate(binary, kernel_dilate, iterations=1)
 
-    # ==========================================
-    # Step 4: 边框修复 (形态学闭运算)
-    # ==========================================
-    # 使用较小的核连接边框断点
     kernel_fix = cv2.getStructuringElement(cv2.MORPH_RECT, (MORPH_KERNEL_WIDTH, MORPH_KERNEL_HEIGHT))
-    # 注意：这里 debug 脚本用的是 kernel_fix=3x3, 但参数区定义了 25x5。
-    # 用户说 "debug已经足够好了"，debug脚本实际代码行170用的是 (3,3)。
-    # 但参数区写的是 25, 5。
-    # 让我仔细看 debug_plate_detector.py 的第 170 行。
-    # "kernel_fix = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))"
-    # 原来 debug 脚本里写死了 (3,3)！而没有使用 MORPH_KERNEL_WIDTH/HEIGHT。
-    # 既然用户觉得好，我就应该用 debug 脚本实际执行的逻辑，也就是 (3,3)。
-    # 可是 (3,3) 真的能连上车牌吗？
-    # 再次检查 debug 脚本... 
-    # 行46: MORPH_KERNEL_WIDTH = 25
-    # 行170: kernel_fix = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    # 行172: binary_border = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_fix)
-    # 这意味着 debug 脚本实际上只用了 3x3 的闭运算。
-    # 为什么效果好？因为 Step 05 用了 RETR_TREE 找边框。
-    # 既然用户确认效果好，我严格遵照 debug 脚本的代码逻辑 (3,3)。
     
     kernel_fix = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     binary_border = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_fix)
@@ -125,9 +91,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "04_border_fix.png"), binary_border)
 
-    # ==========================================
-    # Step 5: 轮廓提取与特征筛选
-    # ==========================================
     contours, hierarchy = cv2.findContours(binary_border, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
     candidates = []
@@ -141,7 +104,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
         for i, contour in enumerate(contours):
             x, y, w, h = cv2.boundingRect(contour)
             
-            # 映射回 resized 全局坐标
             x_global = x + crop_x
             y_global = y + crop_y
             
@@ -153,25 +115,21 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
             if debug and debug_dir:
                 cv2.rectangle(debug_contours, (x, y), (x+w, y+h), (200, 200, 200), 1)
 
-            # 筛选逻辑
             keep = True
             
-            # 1. 宽高比
             if not (MIN_AR < aspect_ratio < MAX_AR):
                 keep = False
-            # 2. 面积
             elif area < MIN_AREA:
                 keep = False
                 
             if keep:
-                # 计算中心位置距离
                 cx = x + w / 2
                 cy = y + h / 2
                 img_cx, img_cy = crop_w / 2, crop_h / 2
                 dist = np.sqrt((cx - img_cx)**2 + (cy - img_cy)**2)
                 
                 candidates.append({
-                    'bbox': (x_global, y_global, w, h), # 存储 resized 全局坐标
+                    'bbox': (x_global, y_global, w, h),
                     'aspect_ratio': aspect_ratio,
                     'area': area,
                     'has_child': has_child,
@@ -184,10 +142,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "05_filtered_contours.png"), debug_contours)
 
-    # ==========================================
-    # Step 6: 候选评分与最终决策
-    # ==========================================
-    # 兜底逻辑：如果没有候选，回退到中心裁剪
     if not candidates:
         if debug:
             print("[Warning] No candidates found. Fallback to center crop.")
@@ -196,13 +150,11 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
         x, y = cx - w // 2, cy - h // 2
         return _pack_result(image, x, y, w, h)
 
-    # 优先选择有子轮廓的
     candidates_with_child = [c for c in candidates if c['has_child']]
     pool = candidates_with_child if candidates_with_child else candidates
     
     best_candidate = None
     
-    # 单候选直接选中
     if len(pool) == 1:
         best_candidate = pool[0]
     else:
@@ -232,9 +184,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
         x, y = cx - w // 2, cy - h // 2
         return _pack_result(image, x, y, w, h)
 
-    # ==========================================
-    # Step 7: 坐标还原与粗剪裁
-    # ==========================================
     x_res, y_res, w_res, h_res = best_candidate['bbox']
     
     # 还原到原始图像坐标
@@ -256,9 +205,6 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "07_rough_crop.png"), rough_crop)
 
-    # ==========================================
-    # Step 9: 精细定位 (Projection Refinement)
-    # ==========================================
     # 保留原有的精修逻辑
     roi_sobel = cv2.Sobel(rough_crop, cv2.CV_8U, 1, 0, ksize=3)
     _, roi_edges = cv2.threshold(roi_sobel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
