@@ -65,7 +65,8 @@ class CharacterRecognizer:
         return templates
 
     def recognize(self, plate_image: np.ndarray, debug_output_dir: Optional[Path] = None, 
-                  configs: List[Dict] = None, ratio_bottom: float = None, ratio_top: float = None) -> str:
+                  configs: List[Dict] = None, ratio_bottom: float = None, ratio_top: float = None,
+                  return_confidence: bool = False) -> Any:
         """
         识别车牌图像中的字符
         Args:
@@ -74,12 +75,14 @@ class CharacterRecognizer:
             configs: 可选，覆盖默认的 CHAR_CONFIGS
             ratio_bottom: 可选，覆盖默认的 RATIO_BOTTOM
             ratio_top: 可选，覆盖默认的 RATIO_TOP
+            return_confidence: 是否返回 (识别结果字符串, 平均置信度)
             
         Returns:
-            str: 识别出的车牌号码
+            str: 识别出的车牌号码 (默认)
+            Tuple[str, float]: (车牌号码, 平均置信度) (当 return_confidence=True 时)
         """
         if plate_image is None:
-            return ""
+            return ("", 0.0) if return_confidence else ""
 
         # 使用传入的配置或默认配置
         current_configs = configs if configs is not None else CHAR_CONFIGS
@@ -272,6 +275,19 @@ class CharacterRecognizer:
 
         # 整合结果
         plate_number = self._format_result(recognition_results)
+        
+        if return_confidence:
+            # 计算平均置信度
+            total_conf = sum(r['conf'] for r in recognition_results.values())
+            count = len(recognition_results)
+            avg_conf = total_conf / count if count > 0 else 0.0
+            
+            # 惩罚项：如果有问号，大幅降低置信度
+            if "?" in plate_number:
+                avg_conf *= 0.5
+                
+            return plate_number, avg_conf
+            
         return plate_number
 
     def _apply_plate_logic(self, results: Dict[str, Dict]):
@@ -350,7 +366,12 @@ class CharacterRecognizer:
             # 改进：将 char_img resize 得稍微大一点点 (比如 44x64)，然后用 40x60 的模板去匹配
             # 这样允许 4px 的位移容错。
             
-            search_h, search_w = 64, 44
+            # 对于第一行字符（汉字/字母），允许更大的搜索范围，以应对切割误差
+            if 'top' in char_pos_name:
+                search_h, search_w = 70, 50 # 更大的搜索范围
+            else:
+                search_h, search_w = 64, 44 # 标准搜索范围
+                
             char_search = cv2.resize(char_img, (search_w, search_h))
             
             res = cv2.matchTemplate(char_search, template_img, cv2.TM_CCOEFF_NORMED)

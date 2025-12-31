@@ -6,11 +6,109 @@ import cv2
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 from pathlib import Path
+import math
 
-def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optional[Path] = None) -> Dict[str, Any]:
+# ==========================================
+# [配置参数] 倾斜校正相关
+# ==========================================
+SKEW_CONFIG = {
+    'resize_max_dim': 600,         # 缩小处理以加快速度
+    'scan_angle_range': 45,        # 扫描范围 +/- 45 度
+    'scan_step': 1.0,              # 粗扫步长
+    'refine_step': 0.1,            # 精扫步长
+    'skew_threshold': 3.0,         # 触发旋转的最小角度阈值
+    'initial_search_step': 2.0,    # 初始搜索步长
+    'min_search_step': 0.5,        # 最小搜索步长
+    'max_iterations': 20,          # 最大搜索迭代次数
+}
+
+def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
+    """旋转图像，背景填充白色"""
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+    return rotated
+
+def detect_skew_angle_radon(image: np.ndarray) -> float:
+    """
+    使用 Radon 变换思想（投影方差最大化）检测倾斜角。
+    """
+    h, w = image.shape[:2]
+    scale = 1.0
+    if max(h, w) > SKEW_CONFIG['resize_max_dim']:
+        scale = SKEW_CONFIG['resize_max_dim'] / max(h, w)
+        img_small = cv2.resize(image, None, fx=scale, fy=scale)
+    else:
+        img_small = image.copy()
+        
+    # 边缘检测预处理
+    img_edges = cv2.Canny(img_small, 100, 200, apertureSize=3)
+    
+    best_angle = 0.0
+    max_variance = -1.0
+    
+    # 1. 粗略扫描
+    angles = np.arange(-SKEW_CONFIG['scan_angle_range'], SKEW_CONFIG['scan_angle_range'], SKEW_CONFIG['scan_step'])
+    center = (img_small.shape[1] // 2, img_small.shape[0] // 2)
+    
+    for angle in angles:
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(img_edges, M, (img_small.shape[1], img_small.shape[0]), flags=cv2.INTER_NEAREST)
+        proj = np.sum(rotated, axis=1)
+        var = np.var(proj)
+        
+        if var > max_variance:
+            max_variance = var
+            best_angle = angle
+            
+    # 2. 精细扫描
+    fine_angles = np.arange(best_angle - 2.0, best_angle + 2.0, SKEW_CONFIG['refine_step'])
+    for angle in fine_angles:
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(img_edges, M, (img_small.shape[1], img_small.shape[0]), flags=cv2.INTER_NEAREST)
+        proj = np.sum(rotated, axis=1)
+        var = np.var(proj)
+        
+        if var > max_variance:
+            max_variance = var
+            best_angle = angle
+            
+    return best_angle
+
+def evaluate_plate_confidence(plate_img: np.ndarray) -> float:
+    """
+    评估车牌图像的质量/置信度（基于垂直投影方差）。
+    """
+    if plate_img is None or plate_img.size == 0:
+        return 0.0
+        
+    if len(plate_img.shape) == 3:
+        gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = plate_img
+        
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    v_proj = np.sum(binary, axis=0)
+    v_proj = v_proj / 255.0
+    
+    variance = np.var(v_proj)
+    
+    mean_val = np.mean(v_proj)
+    crossings = 0
+    for i in range(1, len(v_proj)):
+        if (v_proj[i-1] < mean_val and v_proj[i] >= mean_val) or \
+           (v_proj[i-1] >= mean_val and v_proj[i] < mean_val):
+            crossings += 1
+            
+    if crossings < 10 or crossings > 30:
+        variance *= 0.1
+        
+    return variance
+
+def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Optional[Path] = None) -> Dict[str, Any]:
     """
     定位车牌区域（增强版 - 双向Sobel + 强宽高比筛选）
-    策略：Center Crop -> Dual Sobel -> Pre-dilate -> Small Kernel Close -> RETR_TREE -> High Weight AR Score -> Projection Refine
     
     Args:
         image: 输入灰度图像
@@ -20,6 +118,7 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     Returns:
         包含 'bbox' (x, y, w, h) 和 'image' (裁剪出的车牌图像) 的字典
     """
+    
     h_orig, w_orig = image.shape
     
     TARGET_WIDTH = 800
@@ -295,6 +394,160 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
         print("[Info] Refinement failed, using rough crop.")
         
     return _pack_result(image, x, y, w, h)
+
+def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optional[Path] = None, recognizer: Optional[Any] = None) -> Dict[str, Any]:
+    """
+    车牌定位入口函数（支持自动倾斜校正）
+    
+    Args:
+        image: 输入灰度图像
+        debug: 是否保存调试图像
+        debug_dir: 调试目录
+        recognizer: 字符识别器实例（用于辅助倾斜校正裁判）。如果不传，则只进行基础定位。
+        
+    Returns:
+        Dict 包含:
+        - bbox: (x, y, w, h) 在 rotated_image_full 上的坐标
+        - image: 裁剪出的车牌图像
+        - rotation_angle: 旋转角度
+        - rotated_image_full: 旋转后的完整图像（如果未旋转则为原图）
+    """
+    
+    # 1. 基础定位 (0度)
+    res_0 = _locate_plate_core(image, debug, debug_dir)
+    
+    # 默认结果封装
+    res_0['rotation_angle'] = 0.0
+    res_0['rotated_image_full'] = image
+    
+    # 如果没有识别器，或者不需要高级校正，直接返回
+    if recognizer is None:
+        return res_0
+        
+    # ==========================================
+    # [高级倾斜校正流程]
+    # ==========================================
+    
+    # 2. 检测倾斜角
+    detected_angle = detect_skew_angle_radon(image)
+    
+    if abs(detected_angle) < SKEW_CONFIG['skew_threshold']:
+        return res_0
+        
+    # 3. 爬山法搜索最佳角度
+    current_step = SKEW_CONFIG['initial_search_step']
+    min_step = SKEW_CONFIG['min_search_step']
+    current_angle = detected_angle
+    
+    visited_scores = {}
+    best_result_global = None
+    best_score_global = -1.0
+    best_angle_global = 0.0
+    
+    iteration = 0
+    max_iterations = SKEW_CONFIG['max_iterations']
+    
+    while current_step >= min_step and iteration < max_iterations:
+        iteration += 1
+        candidates_angles = [current_angle, current_angle - current_step, current_angle + current_step]
+        
+        neighborhood_best_score = -1.0
+        neighborhood_best_angle = None
+        
+        for ang in candidates_angles:
+            ang = round(ang, 1)
+            
+            if ang in visited_scores:
+                score = visited_scores[ang]
+            else:
+                if abs(ang) < 0.1:
+                    rot_gray = image
+                else:
+                    rot_gray = rotate_image(image, ang)
+                    
+                res = _locate_plate_core(rot_gray)
+                
+                score = 0.0
+                plate_crop = res.get('image')
+                if plate_crop is not None:
+                    score = evaluate_plate_confidence(plate_crop)
+                    
+                visited_scores[ang] = score
+                
+                if score > best_score_global:
+                    best_score_global = score
+                    best_result_global = res
+                    best_angle_global = ang
+                    best_result_global['rotation_angle'] = ang
+                    best_result_global['rotated_image_full'] = rot_gray # 暂时只存 gray
+            
+            if score > neighborhood_best_score:
+                neighborhood_best_score = score
+                neighborhood_best_angle = ang
+                
+        if neighborhood_best_angle is not None:
+            if neighborhood_best_angle == current_angle:
+                current_step = current_step / 2.0
+            else:
+                current_angle = neighborhood_best_angle
+
+    # 4. 最终裁判：基于字符识别结果对比
+    
+    # (A) 0度得分
+    score_rec_0 = 0.0
+    text_0 = ""
+    if res_0.get('image') is not None:
+        # 使用 return_confidence=True 需要 CharacterRecognizer 支持
+        # 这里假设 recognizer 已经更新
+        try:
+            text_0, score_rec_0 = recognizer.recognize(res_0['image'], return_confidence=True)
+        except:
+             text_0 = recognizer.recognize(res_0['image'])
+             score_rec_0 = 0.0 # 无法获取置信度时回退
+             
+    # (B) 最佳旋转角度得分
+    score_rec_best = 0.0
+    text_best = ""
+    
+    if abs(best_angle_global) < 0.1:
+        # 最佳就是0度
+        return res_0
+        
+    if best_result_global is None:
+        return res_0
+        
+    if best_result_global.get('image') is not None:
+        try:
+            text_best, score_rec_best = recognizer.recognize(best_result_global['image'], return_confidence=True)
+        except:
+            text_best = recognizer.recognize(best_result_global['image'])
+            score_rec_best = 0.0
+
+    if debug:
+        print(f"[SkewCorrection] 0°: '{text_0}' ({score_rec_0:.4f}) vs {best_angle_global}°: '{text_best}' ({score_rec_best:.4f})")
+
+    # (C) 决策
+    # 只有当旋转后的识别分数 显著高于 原图时 (或者原图很烂)，才采用旋转
+    confirmed = False
+    if score_rec_best > score_rec_0 + 0.05:
+        confirmed = True
+    elif "?" in text_0 and "?" not in text_best and score_rec_best > 0.2:
+        confirmed = True
+        
+    if confirmed:
+        # 重新生成一份高质量的旋转图 (如果之前只存了gray)
+        # 实际上我们在 loop 里存的是 rot_gray。如果外部需要 color，外部自己旋转?
+        # 或者我们在这里返回 rotated_image_full 就是 gray 也没关系，因为 bbox 主要是为了定位
+        # 但 run.py 需要 color image 来画图。
+        # 这里 image 传入的是 gray (根据 type hint 和 usage)。
+        # wait, run.py 传入的是 gray。
+        # run.py: plate_result = locate_plate_region(gray, debug=False)
+        # 所以 image 是 gray。
+        # run.py 也有 color image 变量。
+        
+        return best_result_global
+    else:
+        return res_0
 
 def _pack_result(image, x, y, w, h):
     x = int(x)
