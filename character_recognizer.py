@@ -21,9 +21,9 @@ RATIO_TOP = 0.95
 CHAR_CONFIGS = [
     # --- 第一行 (Top Row) ---
     # 字符 1 (汉字，如 "苏")
-    {'name': '01_top_1', 'center_x': 0.37, 'center_y': 0.25, 'w': 0.18},
+    {'name': '01_top_1', 'center_x': 0.37, 'center_y': 0.25, 'w': 0.13},
     # 字符 2 (字母，如 "E")
-    {'name': '02_top_2', 'center_x': 0.62, 'center_y': 0.25, 'w': 0.18},
+    {'name': '02_top_2', 'center_x': 0.62, 'center_y': 0.25, 'w': 0.13},
     
     # --- 第二行 (Bottom Row) ---
     # 字符 3
@@ -118,6 +118,10 @@ class CharacterRecognizer:
             # print("  [Debug] Detected White Background, Inverting to Black Background...")
             binary_plate = cv2.bitwise_not(binary_plate)
         
+        # [新增] 椒盐去噪 (中值滤波)
+        # 在二值化和反转之后进行，去除孤立的噪点
+        binary_plate = cv2.medianBlur(binary_plate, 3)
+        
         # 3. 形态学操作 (开运算去除细小噪点)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         processed_plate = cv2.morphologyEx(binary_plate, cv2.MORPH_OPEN, kernel)
@@ -164,8 +168,55 @@ class CharacterRecognizer:
             y2 = min(plate_h, y1 + box_h)
             
             # 提取字符图像
-            if x2 > x1 and y2 > y1:
-                # 使用处理后的二值图像进行切割
+            real_w = x2 - x1
+            real_h = y2 - y1
+            
+            if real_w > 0 and real_h > 0:
+                # [新增] 二次筛选逻辑：在粗略框内部寻找最佳连通域 (与 test_segment.py 保持一致)
+                # 先在处理后的图上截取粗略 ROI
+                char_roi_rough = processed_plate[y1:y2, x1:x2]
+                
+                # 查找轮廓
+                contours, _ = cv2.findContours(char_roi_rough, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                best_rect = None
+                max_score = -1
+                
+                roi_h, roi_w = char_roi_rough.shape
+                roi_center_x, roi_center_y = roi_w / 2, roi_h / 2
+                
+                for cnt in contours:
+                    cx, cy, cw, ch = cv2.boundingRect(cnt)
+                    
+                    # 过滤太小的噪点 (例如面积小于 20)
+                    if cw * ch < 20: continue
+                    
+                    # 计算得分
+                    # 1. 面积 (越大越好)
+                    area = cw * ch
+                    
+                    # 2. 距离中心点的距离 (越近越好)
+                    cnt_center_x = cx + cw / 2
+                    cnt_center_y = cy + ch / 2
+                    dist = ((cnt_center_x - roi_center_x)**2 + (cnt_center_y - roi_center_y)**2)**0.5
+                    
+                    # 得分公式：面积 / (1 + 权重 * 距离)
+                    score = area / (1 + 0.1 * dist)
+                    
+                    if score > max_score:
+                        max_score = score
+                        best_rect = (cx, cy, cw, ch)
+                
+                # 如果找到了更好的框，更新 x1, y1, x2, y2
+                if best_rect:
+                    rx, ry, rw, rh = best_rect
+                    # 更新为全局坐标
+                    x1 = x1 + rx
+                    y1 = y1 + ry
+                    x2 = x1 + rw
+                    y2 = y1 + rh
+                
+                # 使用最终坐标切割
                 char_img = processed_plate[y1:y2, x1:x2]
                 
                 if debug_output_dir:
