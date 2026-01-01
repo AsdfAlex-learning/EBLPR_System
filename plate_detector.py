@@ -1,29 +1,22 @@
-"""
-车牌检测模块
-实现车牌区域的定位、检测和提取功能
-"""
 import cv2
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 from pathlib import Path
 import math
 
-# ==========================================
-# [配置参数] 倾斜校正相关
-# ==========================================
+# 倾斜矫正配置参数
 SKEW_CONFIG = {
-    'resize_max_dim': 600,         # 缩小处理以加快速度
-    'scan_angle_range': 45,        # 扫描范围 +/- 45 度
-    'scan_step': 1.0,              # 粗扫步长
-    'refine_step': 0.1,            # 精扫步长
-    'skew_threshold': 3.0,         # 触发旋转的最小角度阈值
-    'initial_search_step': 2.0,    # 初始搜索步长
-    'min_search_step': 0.5,        # 最小搜索步长
-    'max_iterations': 20,          # 最大搜索迭代次数
+    'resize_max_dim': 600,       # 预处理缩放最大尺寸
+    'scan_angle_range': 45,      # 扫描角度范围 +/-
+    'scan_step': 1.0,            # 粗略扫描步长
+    'refine_step': 0.1,          # 精细扫描步长
+    'skew_threshold': 3.0,       # 矫正触发阈值
+    'initial_search_step': 2.0,  # 爬山法初始步长
+    'min_search_step': 0.5,      # 爬山法最小步长
+    'max_iterations': 20,        # 最大迭代次数
 }
 
 def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
-    """旋转图像，背景填充白色"""
     h, w = image.shape[:2]
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -31,24 +24,23 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
     return rotated
 
 def detect_skew_angle_radon(image: np.ndarray) -> float:
-    """
-    使用 Radon 变换思想（投影方差最大化）检测倾斜角。
-    """
     h, w = image.shape[:2]
     scale = 1.0
+    
+    # 缩放图像加速计算
     if max(h, w) > SKEW_CONFIG['resize_max_dim']:
         scale = SKEW_CONFIG['resize_max_dim'] / max(h, w)
         img_small = cv2.resize(image, None, fx=scale, fy=scale)
     else:
         img_small = image.copy()
         
-    # 边缘检测预处理
+    # 边缘检测提取纹理
     img_edges = cv2.Canny(img_small, 100, 200, apertureSize=3)
     
     best_angle = 0.0
     max_variance = -1.0
     
-    # 1. 粗略扫描
+    # 粗略扫描
     angles = np.arange(-SKEW_CONFIG['scan_angle_range'], SKEW_CONFIG['scan_angle_range'], SKEW_CONFIG['scan_step'])
     center = (img_small.shape[1] // 2, img_small.shape[0] // 2)
     
@@ -62,7 +54,7 @@ def detect_skew_angle_radon(image: np.ndarray) -> float:
             max_variance = var
             best_angle = angle
             
-    # 2. 精细扫描
+    # 精细扫描
     fine_angles = np.arange(best_angle - 2.0, best_angle + 2.0, SKEW_CONFIG['refine_step'])
     for angle in fine_angles:
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -77,9 +69,6 @@ def detect_skew_angle_radon(image: np.ndarray) -> float:
     return best_angle
 
 def evaluate_plate_confidence(plate_img: np.ndarray) -> float:
-    """
-    评估车牌图像的质量/置信度（基于垂直投影方差）。
-    """
     if plate_img is None or plate_img.size == 0:
         return 0.0
         
@@ -89,11 +78,11 @@ def evaluate_plate_confidence(plate_img: np.ndarray) -> float:
         gray = plate_img
         
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    v_proj = np.sum(binary, axis=0)
-    v_proj = v_proj / 255.0
+    v_proj = np.sum(binary, axis=0) / 255.0
     
     variance = np.var(v_proj)
     
+    # 计算穿过均值次数 (纹理丰富度)
     mean_val = np.mean(v_proj)
     crossings = 0
     for i in range(1, len(v_proj)):
@@ -101,44 +90,27 @@ def evaluate_plate_confidence(plate_img: np.ndarray) -> float:
            (v_proj[i-1] >= mean_val and v_proj[i] < mean_val):
             crossings += 1
             
+    # 纹理过少或过多则降低置信度
     if crossings < 10 or crossings > 30:
         variance *= 0.1
         
     return variance
 
 def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """
-    定位车牌区域（增强版 - 双向Sobel + 强宽高比筛选）
-    
-    Args:
-        image: 输入灰度图像
-        debug: 是否保存调试图像
-        debug_dir: 调试图像保存目录
-    
-    Returns:
-        包含 'bbox' (x, y, w, h) 和 'image' (裁剪出的车牌图像) 的字典
-    """
-    
     h_orig, w_orig = image.shape
     
+    # 参数配置
     TARGET_WIDTH = 800
-    CROP_RATIO_W = 0.20         # 左右各裁剪掉 20%
-    CROP_RATIO_H = 0.20         # 上下各裁剪掉 20%
-    
-    # 形态学参数
-    MORPH_KERNEL_WIDTH = 25     # 较小的核，顺着边框连接
-    MORPH_KERNEL_HEIGHT = 5
-    
-    # 筛选参数
-    MIN_AR = 1.2                # 双层车牌较方
-    MAX_AR = 5.0                # 允许单层车牌
-    MIN_AREA = 2000             # 稍微提高阈值
-    TARGET_AR = 181.0 / 91.5    # 1.98
-    
-    # 精修参数
+    CROP_RATIO_W = 0.20
+    CROP_RATIO_H = 0.20
+    MIN_AR = 1.2
+    MAX_AR = 5.0
+    MIN_AREA = 2000
+    TARGET_AR = 181.0 / 91.5
     REFINE_PAD_W = 0.2
     REFINE_PAD_H = 0.5
     
+    # 预处理 (缩放/裁剪)
     scale = TARGET_WIDTH / w_orig
     target_height = int(h_orig * scale)
     resized = cv2.resize(image, (TARGET_WIDTH, target_height))
@@ -157,41 +129,36 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "01_center_crop.png"), cropped)
 
+    # 边缘检测 (Sobel)
     blurred = cv2.GaussianBlur(cropped, (5, 5), 0)
     
-    # Sobel X (垂直边缘)
     sobel_x = cv2.Sobel(blurred, cv2.CV_16S, 1, 0, ksize=3)
     abs_sobel_x = cv2.convertScaleAbs(sobel_x)
-    
-    # Sobel Y (水平边缘) - 捕捉汉字横向笔画
     sobel_y = cv2.Sobel(blurred, cv2.CV_16S, 0, 1, ksize=3)
     abs_sobel_y = cv2.convertScaleAbs(sobel_y)
     
-    # 混合边缘 (各占 50%)
     combined_sobel = cv2.addWeighted(abs_sobel_x, 0.5, abs_sobel_y, 0.5, 0)
     
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "02_sobel.png"), combined_sobel)
 
+    # 二值化/形态学
     ret, binary = cv2.threshold(combined_sobel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "03_binary.png"), binary)
         
-    # 预膨胀：强化弱边缘
     kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     binary = cv2.dilate(binary, kernel_dilate, iterations=1)
 
-    kernel_fix = cv2.getStructuringElement(cv2.MORPH_RECT, (MORPH_KERNEL_WIDTH, MORPH_KERNEL_HEIGHT))
-    
     kernel_fix = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     binary_border = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_fix)
     
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "04_border_fix.png"), binary_border)
 
+    # 轮廓筛选
     contours, hierarchy = cv2.findContours(binary_border, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
     candidates = []
     
     if debug and debug_dir:
@@ -199,27 +166,20 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
         
     if hierarchy is not None:
         hierarchy = hierarchy[0]
-        
         for i, contour in enumerate(contours):
             x, y, w, h = cv2.boundingRect(contour)
-            
             x_global = x + crop_x
             y_global = y + crop_y
-            
             aspect_ratio = w / float(h)
             area = w * h
-            
             has_child = hierarchy[i][2] != -1
             
             if debug and debug_dir:
                 cv2.rectangle(debug_contours, (x, y), (x+w, y+h), (200, 200, 200), 1)
 
             keep = True
-            
-            if not (MIN_AR < aspect_ratio < MAX_AR):
-                keep = False
-            elif area < MIN_AREA:
-                keep = False
+            if not (MIN_AR < aspect_ratio < MAX_AR): keep = False
+            elif area < MIN_AREA: keep = False
                 
             if keep:
                 cx = x + w / 2
@@ -241,9 +201,10 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "05_filtered_contours.png"), debug_contours)
 
+    # 无有效候选，回退中心裁剪
     if not candidates:
         if debug:
-            print("[Warning] No candidates found. Fallback to center crop.")
+            print("[WARN] 无有效候选，回退中心裁剪")
         cx, cy = w_orig // 2, h_orig // 2
         w, h = int(w_orig * 0.6), int(h_orig * 0.3)
         x, y = cx - w // 2, cy - h // 2
@@ -254,22 +215,17 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
     
     best_candidate = None
     
+    # 候选评分
     if len(pool) == 1:
         best_candidate = pool[0]
     else:
-        # 多候选评分
         best_score = -999.0
-        
         for c in pool:
-            # 1. 宽高比评分 (权重 0.7)
             ar_diff = abs(c['aspect_ratio'] - TARGET_AR)
             score_ar = 1.0 - min(1.0, ar_diff / 0.5)
-            
-            # 2. 距离评分 (权重 0.3)
             max_dist_ref = np.sqrt(crop_w**2 + crop_h**2) / 2
             norm_dist = c['dist_from_center'] / (max_dist_ref * 0.6)
             score_center = max(0.0, 1.0 - norm_dist)
-            
             total_score = score_ar * 0.7 + score_center * 0.3
             
             if total_score > best_score:
@@ -277,21 +233,18 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
                 best_candidate = c
                 
     if not best_candidate:
-         # 理论上不应该到这里，除非 pool 为空
         cx, cy = w_orig // 2, h_orig // 2
         w, h = int(w_orig * 0.6), int(h_orig * 0.3)
         x, y = cx - w // 2, cy - h // 2
         return _pack_result(image, x, y, w, h)
 
+    # 精细定位
     x_res, y_res, w_res, h_res = best_candidate['bbox']
-    
-    # 还原到原始图像坐标
     x = int(x_res / scale)
     y = int(y_res / scale)
     w = int(w_res / scale)
     h = int(h_res / scale)
     
-    # 稍微扩大一点区域进行精修
     pad_w = int(w * REFINE_PAD_W)
     pad_h = int(h * REFINE_PAD_H)
     crop_x1 = max(0, x - pad_w)
@@ -304,7 +257,6 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
     if debug and debug_dir:
         cv2.imwrite(str(debug_dir / "07_rough_crop.png"), rough_crop)
 
-    # 保留原有的精修逻辑
     roi_sobel = cv2.Sobel(rough_crop, cv2.CV_8U, 1, 0, ksize=3)
     _, roi_edges = cv2.threshold(roi_sobel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
@@ -312,8 +264,6 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
         cv2.imwrite(str(debug_dir / "08_roi_edges.png"), roi_edges)
 
     h_crop, w_crop = rough_crop.shape
-    
-    # 水平投影
     h_proj = np.sum(roi_edges, axis=1)
     max_val = np.max(h_proj)
     thresh_h = max_val * 0.2
@@ -334,7 +284,6 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
                 bottom_limit = i
                 break
                 
-    # 垂直投影
     roi_mid = roi_edges[top_limit:bottom_limit, :]
     if roi_mid.shape[0] > 0:
         v_proj = np.sum(roi_mid, axis=0)
@@ -344,7 +293,6 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
         center_x = w_crop // 2
         left_limit = 0
         right_limit = w_crop
-        
         gap_tolerance = int(w_crop * 0.10) 
         
         zero_count = 0
@@ -372,11 +320,8 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
         refined_w = right_limit - left_limit
         refined_h = bottom_limit - top_limit
         
-        # 验证精修结果
         rough_ar = w / h
-        min_h_ratio = 0.6
-        if rough_ar < 2.5: 
-             min_h_ratio = 0.3
+        min_h_ratio = 0.6 if rough_ar >= 2.5 else 0.3
         
         if refined_w > w * 0.5 and refined_h > h * min_h_ratio:
             pad = 5
@@ -384,57 +329,31 @@ def _locate_plate_core(image: np.ndarray, debug: bool = False, debug_dir: Option
             final_y = max(0, refined_y - pad)
             final_w = min(w_orig - final_x, refined_w + 2*pad)
             final_h = min(h_orig - final_y, refined_h + 2*pad)
-            
             return _pack_result(image, final_x, final_y, final_w, final_h)
         else:
             if debug:
-                print(f"[Info] Refinement rejected: w={refined_w}, h={refined_h}")
+                print(f"[DEBUG] 精修被拒: 尺寸不符 w={refined_w}, h={refined_h}")
             
     if debug:
-        print("[Info] Refinement failed, using rough crop.")
+        print("[DEBUG] 精修失败，使用粗略结果")
         
     return _pack_result(image, x, y, w, h)
 
 def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optional[Path] = None, recognizer: Optional[Any] = None) -> Dict[str, Any]:
-    """
-    车牌定位入口函数（支持自动倾斜校正）
-    
-    Args:
-        image: 输入灰度图像
-        debug: 是否保存调试图像
-        debug_dir: 调试目录
-        recognizer: 字符识别器实例（用于辅助倾斜校正裁判）。如果不传，则只进行基础定位。
-        
-    Returns:
-        Dict 包含:
-        - bbox: (x, y, w, h) 在 rotated_image_full 上的坐标
-        - image: 裁剪出的车牌图像
-        - rotation_angle: 旋转角度
-        - rotated_image_full: 旋转后的完整图像（如果未旋转则为原图）
-    """
-    
-    # 1. 基础定位 (0度)
+    # 初始检测
     res_0 = _locate_plate_core(image, debug, debug_dir)
-    
-    # 默认结果封装
     res_0['rotation_angle'] = 0.0
     res_0['rotated_image_full'] = image
     
-    # 如果没有识别器，或者不需要高级校正，直接返回
     if recognizer is None:
         return res_0
         
-    # ==========================================
-    # [高级倾斜校正流程]
-    # ==========================================
-    
-    # 2. 检测倾斜角
+    # 倾斜估计
     detected_angle = detect_skew_angle_radon(image)
-    
     if abs(detected_angle) < SKEW_CONFIG['skew_threshold']:
         return res_0
         
-    # 3. 爬山法搜索最佳角度
+    # 爬山法优化角度
     current_step = SKEW_CONFIG['initial_search_step']
     min_step = SKEW_CONFIG['min_search_step']
     current_angle = detected_angle
@@ -450,13 +369,11 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
     while current_step >= min_step and iteration < max_iterations:
         iteration += 1
         candidates_angles = [current_angle, current_angle - current_step, current_angle + current_step]
-        
         neighborhood_best_score = -1.0
         neighborhood_best_angle = None
         
         for ang in candidates_angles:
             ang = round(ang, 1)
-            
             if ang in visited_scores:
                 score = visited_scores[ang]
             else:
@@ -464,14 +381,11 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
                     rot_gray = image
                 else:
                     rot_gray = rotate_image(image, ang)
-                    
                 res = _locate_plate_core(rot_gray)
-                
                 score = 0.0
                 plate_crop = res.get('image')
                 if plate_crop is not None:
                     score = evaluate_plate_confidence(plate_crop)
-                    
                 visited_scores[ang] = score
                 
                 if score > best_score_global:
@@ -479,7 +393,7 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
                     best_result_global = res
                     best_angle_global = ang
                     best_result_global['rotation_angle'] = ang
-                    best_result_global['rotated_image_full'] = rot_gray # 暂时只存 gray
+                    best_result_global['rotated_image_full'] = rot_gray
             
             if score > neighborhood_best_score:
                 neighborhood_best_score = score
@@ -491,29 +405,20 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
             else:
                 current_angle = neighborhood_best_angle
 
-    # 4. 最终裁判：基于字符识别结果对比
-    
-    # (A) 0度得分
+    # 验证矫正效果
     score_rec_0 = 0.0
     text_0 = ""
     if res_0.get('image') is not None:
-        # 使用 return_confidence=True 需要 CharacterRecognizer 支持
-        # 这里假设 recognizer 已经更新
         try:
             text_0, score_rec_0 = recognizer.recognize(res_0['image'], return_confidence=True)
         except:
-             text_0 = recognizer.recognize(res_0['image'])
-             score_rec_0 = 0.0 # 无法获取置信度时回退
+            text_0 = recognizer.recognize(res_0['image'])
+            score_rec_0 = 0.0
              
-    # (B) 最佳旋转角度得分
     score_rec_best = 0.0
     text_best = ""
     
-    if abs(best_angle_global) < 0.1:
-        # 最佳就是0度
-        return res_0
-        
-    if best_result_global is None:
+    if abs(best_angle_global) < 0.1 or best_result_global is None:
         return res_0
         
     if best_result_global.get('image') is not None:
@@ -524,10 +429,8 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
             score_rec_best = 0.0
 
     if debug:
-        print(f"[SkewCorrection] 0°: '{text_0}' ({score_rec_0:.4f}) vs {best_angle_global}°: '{text_best}' ({score_rec_best:.4f})")
+        print(f"[DEBUG] 倾斜验证: 0°->'{text_0}' ({score_rec_0:.4f}) vs {best_angle_global}°->'{text_best}' ({score_rec_best:.4f})")
 
-    # (C) 决策
-    # 只有当旋转后的识别分数 显著高于 原图时 (或者原图很烂)，才采用旋转
     confirmed = False
     if score_rec_best > score_rec_0 + 0.05:
         confirmed = True
@@ -535,41 +438,17 @@ def locate_plate_region(image: np.ndarray, debug: bool = False, debug_dir: Optio
         confirmed = True
         
     if confirmed:
-        # 重新生成一份高质量的旋转图 (如果之前只存了gray)
-        # 实际上我们在 loop 里存的是 rot_gray。如果外部需要 color，外部自己旋转?
-        # 或者我们在这里返回 rotated_image_full 就是 gray 也没关系，因为 bbox 主要是为了定位
-        # 但 run.py 需要 color image 来画图。
-        # 这里 image 传入的是 gray (根据 type hint 和 usage)。
-        # wait, run.py 传入的是 gray。
-        # run.py: plate_result = locate_plate_region(gray, debug=False)
-        # 所以 image 是 gray。
-        # run.py 也有 color image 变量。
-        
         return best_result_global
     else:
         return res_0
 
 def _pack_result(image, x, y, w, h):
-    x = int(x)
-    y = int(y)
-    w = int(w)
-    h = int(h)
-    
+    x, y, w, h = int(x), int(y), int(w), int(h)
     if x < 0: x = 0
     if y < 0: y = 0
     if x + w > image.shape[1]: w = image.shape[1] - x
     if y + h > image.shape[0]: h = image.shape[0] - y
-    
     plate_img = image[y:y+h, x:x+w]
-    
-    return {
-        'bbox': (x, y, w, h),
-        'image': plate_img
-    }
+    return {'bbox': (x, y, w, h), 'image': plate_img}
 
-def detect_plate_count(image: np.ndarray) -> int:
-    return 1
 
-def detect_all_plates(image: np.ndarray) -> List[Dict[str, Any]]:
-    res = locate_plate_region(image)
-    return [res]
