@@ -51,7 +51,7 @@ Thumbs.db
 # Output Images
 output_image/
 flowchart/
+processed_img/
 
 # Input Images Content
 input_images/*
-!input_images/.gitkeep
